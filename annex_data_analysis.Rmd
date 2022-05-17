@@ -1,0 +1,874 @@
+---
+title: "Annex - Data analysis"
+author: "Maria Mercedes Serra"
+date: "4/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(patchwork)
+library(kableExtra)
+library(skimr)
+library(naniar)
+library(patchwork)
+library(lubridate)
+library(purrr)
+library(tidyr)
+```
+
+
+
+```{r}
+# I load the data from csv file:
+lung_data <- read.csv('data/complete_clinrad_data.csv', sep = ',') # called complete clin rad data
+
+head(lung_data)
+
+# I assign Patient ID to rownames to ease further work with the data
+rownames(lung_data) <- lung_data$PatientID
+
+#I remove PatientID column an additional index column not of interest as we will use rownames(patient id) to identify each entry
+lung_data <- lung_data %>% select(.,-c(X,PatientID))
+
+head(lung_data)
+
+# I check dataframe dimensions:
+dim(lung_data)
+
+# As many clinical variables are identified as numeric when this is not the case, 
+# I modify data type for specific variables of interest
+# clinical T,N,M and overall stage are ordered categorical variables:
+lung_data$clinical.T.Stage <- factor(lung_data$clinical.T.Stage, ordered = TRUE)
+lung_data$Clinical.N.Stage <- factor(lung_data$Clinical.N.Stage, ordered = TRUE)
+lung_data$Clinical.M.Stage <- factor(lung_data$Clinical.M.Stage, ordered = TRUE)
+lung_data$Overall.Stage <- factor(lung_data$Overall.Stage, ordered = TRUE)
+# dead status event is a binary categorical variable:
+lung_data$deadstatus.event <- factor(lung_data$deadstatus.event)
+# gender, histology, and manufacturer are all categorical variables also:
+lung_data$gender <- factor(lung_data$gender)
+lung_data$Histology <- factor(lung_data$Histology)
+lung_data$Manufacturer <- factor(lung_data$Manufacturer)
+# study date is a date variable, we adjust format with the help of lubridate package:
+lung_data$Study.Date <- mdy(lung_data$Study.Date)
+
+# I check resulting data structure and varnames for the modified variables:
+str(lung_data[1:11])
+
+# We can see the remainin numeric variables account for all the radiomic variables (1246)
+dim(lung_data %>% keep(is.numeric) %>% select(.,-c(age,Survival.time)))
+```
+
+
+## Exploratory analysis
+
+Main research question is weather there is an association between CT radiomic features and NSCLC histology subtype. 
+
+I will do an initial exploratory analysis including: 
+- Search for missing values, 
+- Identify distribution of the different variables and check for normality,
+- Coherence control within each variable and across different variables, 
+- Search for outliers, 
+- Check relationship/independency between categorical variables 
+- Check relationship numerical variables, correlation measures, heatmaps,
+- Check relationship between numerical and categorical variables (scatter plots, boxplots, etc), t-test
+
+As radiomic features determine a high dimensional dataset of redundant features, during this exploratory analysis I we will also perform some initial features selection for this variables.
+
+
+### Search for missing values:
+
+
+First I do an exploratory analysis to check for missing values in the whole data frame.
+
+
+```{r}
+table(is.na(lung_data))
+table(is.null(lung_data))
+```
+
+
+We can see there are 66 missing values in total.
+
+
+I generate a table that shows within the whole dataframe the variables with a list one missing value and the detail of number of missing values and its completeness rate.
+
+
+```{r}
+skimr::skim(lung_data) %>% select(skim_variable,n_missing,complete_rate) %>% filter(n_missing > 0) %>% kable() %>% kable_classic_2() %>%
+  save_kable("tables/table5.1.pdf")
+```
+
+
+
+
+
+```{r}
+gg_miss_upset(lung_data %>% select_if(~ any(is.na(.)))) 
+ggsave("figures/Fig5.1.tiff",width = 174, height = 100, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+Overall completeness rate was superior to 0.9 for every variable. Histology is our response variable for our first research question so observations without a value for histology variable will be fully excluded. In addition as a subgroup of NSCLC not otherwise specified (nos) is available within the histology categories it is not clear if NA cases have in effect the confirmation of NSCLC diagnosis at all; so it makes sense to exclude this cases.
+
+
+```{r}
+lung_data_complete <- lung_data %>% drop_na(Histology)
+dim(lung_data_complete)
+```
+
+
+After excluding every row with missing histology value, we end up with 379 observations.
+On the contrary we might imput missing values affecting other variables to avoid missing additional observations that may be usefull, but I will continue with imputation after evaluation data distribution,  and data coherence to check if any additional values should be considered as missing and which imputation technique might be pertinent to use.
+
+
+
+### Identify distribution of the different variables, continuous check for normality, categorical check for different levels and coherence
+
+
+I verify general statistical summary and distribution of features.
+
+
+First for study dates:
+
+
+```{r}
+lung_data_complete %>% select(Study.Date) %>% skim()
+```
+
+
+Then I get summary statistics for factor variables:
+
+
+```{r}
+lung_data_complete %>% 
+  keep(is.factor) %>% 
+  skim() %>% 
+  select(.,-c(skim_type,n_missing,complete_rate)) %>% kable() %>% kable_classic_2() %>%
+  save_kable("tables/table5.2.pdf")
+```
+
+
+I represent factor variables with barplots to visualize data distribution and clases available for each categorical variable:
+
+
+```{r}
+lung_data_complete %>%
+  keep(is.factor) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_bar()+
+    scale_y_continuous( limits = c(0,400)) +
+    geom_text(stat='count', aes(label=..count..), vjust=-0.1, size = 3)
+ggsave("figures/Fig5.2.tiff",width = 174, height = 100, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+We can see from the Overall.Stage variable distribution, that stage IV is not represented in this dataset so we will center analysis mainly on this groups of non-metastatic disease patients. There seems to be some isolated incoherent, erroneous registries regarding clinical T, N and M categories. Possible values for clinical.T.Stage category in lung cancer range from T1 to T4, and as we can see there are few cases with T == 5. Same happens with Clinical.N.Stage == 4 and we also find some cases with Clinical M Stage == 3 that do not exists either within this classicifcation. Specific incoherent cases are enumerated in tables 5.3, 5.4, 5.5 respectively.
+
+
+```{r}
+lung_data_complete %>% filter(clinical.T.Stage ==5) %>% select(clinical.T.Stage,Overall.Stage)  %>% 
+  kable() %>% 
+  kable_classic_2() %>%
+  save_kable("tables/table5.3.pdf")
+```
+
+
+```{r}
+lung_data_complete %>% filter(Clinical.N.Stage ==4) %>% select(Clinical.N.Stage,Overall.Stage) %>% 
+  kable() %>% 
+  kable_classic_2()%>%
+  save_kable("tables/table5.4.pdf")
+```
+
+
+
+```{r}
+lung_data_complete %>% filter(Clinical.M.Stage ==3) %>% select(Clinical.M.Stage,Overall.Stage) %>% 
+  kable() %>% 
+  kable_classic_2() %>%
+  save_kable("tables/table5.5.pdf")
+```
+
+
+
+These are interpreted as erroneous so missing values are assigned to replace these entries as well as for plastimatch manufacturer. This will be then handled along with missing values imputation.
+
+
+```{r}
+# I assign na values to erroneous entries and drop unused levels:
+lung_data_complete <- lung_data_complete %>% replace_with_na(
+  replace = list(clinical.T.Stage = 5,
+                 Clinical.N.Stage = 4,
+                 Clinical.M.Stage = 3,
+                 Manufacturer = 'Plastimatch')) %>%
+  droplevels.data.frame()
+```
+
+
+
+We can see now the joint missing patterns after removing observations with histology missing values and imputing with missing values the incoherent clinical T/N/M entries:
+
+
+```{r}
+gg_miss_upset(lung_data_complete %>% select_if(~ any(is.na(.)))) 
+ggsave("figures/Fig5.4.tiff",width = 174, height = 100, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+
+Now I continue with the summary statistics for numeric clinical numeric variables: 
+
+
+```{r}
+lung_data_complete %>% 
+  select(age,Survival.time) %>% 
+  skim() %>% 
+  select(.,-c(skim_type,n_missing,complete_rate)) %>% kable() %>% kable_classic_2() %>%
+  save_kable("tables/table5.6.pdf")
+```
+
+
+And generate histograms to better visualize distributions:
+
+
+- First for the remaining clinical variables:
+
+
+```{r}
+lung_data_complete %>%
+  select(age,Survival.time) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free", ncol = 4) +
+    geom_histogram() 
+ggsave("figures/Fig5.5.tiff",width = 174, height = 50, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+- As we have 1246 radiomic variables, I'll continue exploring clinical and main study info first, and continue with radiomics exploratory analysis while and after performing variable selection
+
+
+
+### Check relationship/independency between categorical variables 9crosstabs, chi square)
+
+
+First as my first research question is weather radiomic variables are related with histology class or not, I want to check histology is independent from other clinical variables and manufacturer of the scanner used to do the exam. 
+
+
+
+```{r}
+g1 <- ggplot(lung_data_complete,aes(age, fill = Histology)) + 
+  geom_boxplot(alpha = .5) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = 'none')
+```
+
+
+```{r}
+g2 <- ggplot(lung_data_complete,aes(gender, fill = Histology)) + 
+  geom_bar(position = 'dodge',alpha = .5) +
+  theme_bw() +
+  theme(legend.position = 'none')
+```
+
+
+
+```{r}
+g3 <- ggplot(lung_data_complete,aes(Overall.Stage, fill = Histology)) + 
+  geom_bar(position = 'dodge',alpha = .5) +
+  theme_bw() 
+```
+
+
+```{r}
+g4 <- ggplot(lung_data_complete,aes(Manufacturer, fill = Histology)) + 
+  geom_bar(position = 'dodge',alpha = .5) +
+  theme_bw() 
+```
+
+
+
+
+
+
+```{r}
+library(patchwork)
+(g1 + g2)/(g3 + g4) + plot_layout(guides = "collect") 
+```
+
+
+```{r}
+library(crosstable)
+library(flextable)
+crosstable(lung_data_complete, c(age, gender, Overall.Stage, Manufacturer, deadstatus.event), 
+           by = Histology, test = TRUE)%>% 
+           as_flextable() %>% save_as_image("table5.7.png")
+
+crosstable(lung_data_complete, c(age, gender, Manufacturer, deadstatus.event), 
+           by = Overall.Stage, test = TRUE)%>% 
+           as_flextable()
+
+crosstable(lung_data_complete, c(age, gender, Manufacturer), 
+           by = deadstatus.event, test = TRUE)%>% 
+           as_flextable()
+```
+
+
+
+In this tables we can easily see how gender and histology, and manufacturer and histology are independent. On the contrary, there seems to be some relationship between histology group and age, between histology and overall stage, as well as between age, dead status event and overall stage. In this case it seems specially important to evaluate the combination of these as covariates of the radiomic measure in any model generated.
+
+
+
+```{r}
+library(scales)
+lung_data_complete$Study.Date <- as.POSIXct(lung_data_complete$Study.Date)
+ggplot(lung_data_complete, aes(Study.Date, ..count.., fill = Histology)) + 
+    geom_histogram(alpha = .5) +
+    theme_bw() + xlab(NULL) +
+    scale_x_datetime(breaks = date_breaks("3 months"),
+                     labels = date_format("%Y-%b")) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+
+
+Regarding the period of time during which studies were performed, we see all clases seem pretty much represented along the years in favor of avoiding specific technique batch biases. 
+
+
+
+Relaitionship between ordinal variables (spearman)
+
+
+
+### Relaitionship between radiomic numeric variables (pearson)
+
+
+```{r}
+library(DataExplorer)
+radiomic_vars <- lung_data_complete %>% keep(is.numeric) %>%
+  select(.,-c(age,Survival.time))
+plot_correlation(radiomic_vars, type = "c", theme_config = list("legend.position" = "bottom","axis.text.x" = element_blank(), "axis.text.y" = element_blank()))
+ggsave("figures/Fig5..png",width = 400, height = 400, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+Now I will perform a Shapiro Wilk test to formaly evaluate normality for every numeric variable available in current data frame:
+
+
+```{r}
+# I apply shapiro wilk test to every numeric value in the data frame
+shap <- lung_data_complete %>% 
+  keep(is.numeric) %>% 
+  apply(.,2,shapiro.test) 
+
+# I define a vector with a boolean stating if p value is greater than 0.05
+shapres <- sapply(shap, function(x) x$p.value > .05)
+table(shapres)
+# I display variables with a shapiro wilk test that shows a p value
+# greater than 0.05:
+which(shapres==TRUE)
+```
+
+
+When exploring numerical variable distribution we could already see many variables with an assymetric distribution mostly non-normally distributed variables. We will take this into account when selecting  outlier detection techniques and imputation techniques both for outliers and missing values.
+
+
+
+### Search for outliers
+
+
+#### Univariate outlier detection:
+
+Univariate oulier detection with IQR + 1.5 criteria. If we just check in univariate manner, we can see almost every observation has at least one value corresponding to an outlier in at least one variable.
+
+
+```{r}
+library(performance)
+check_outliers(lung_data_complete, method = "iqr")
+```
+
+ 
+ 
+#### Multivariate outlier detection:
+
+
+```{r}
+library(missForest)
+# imput missing values
+lung_data.imp <- missForest(lung_data_complete %>% select(.,-Study.Date))
+
+#check imputation error. NRMSE is normalized mean squared error. It is used to represent error derived 
+# from imputing continuous values. PFC (proportion of falsely classified) is used to represent error 
+# derived from imputing categorical values.
+lung_data.imp$OOBerror
+
+#check new values
+lung_data.imp$ximp[rownames(lung_data.imp$ximp) %in% rownames(which(is.na(lung_data_complete), arr.ind=TRUE)),] %>% select(age,gender,clinical.T.Stage,Clinical.N.Stage,Clinical.M.Stage,Overall.Stage,deadstatus.event,Manufacturer)
+
+# we can see now M stage is in fact 0 for every entry, so we will remove this column
+table(lung_data.imp$ximp$Clinical.M.Stage)
+
+# I remove Clinical M Stage from the dataset and I add Study Date again
+lung_data_naimp <- lung_data.imp$ximp %>% select(.,-Clinical.M.Stage) 
+head(lung_data_naimp)
+```
+
+
+```{r}
+library(HDoutliers)
+
+# Transforms the data according to the specifications in Wilkinson’s hdoutliers algorithm.
+# Replaces each categorical variables with a numeric variable corresponding to its first component in multiple correspondence analysis, then maps the data to the unit square.
+
+lung_data.trans <- dataTrans(lung_data_naimp)
+
+# Implements the first stage of the hdoutliers Algorithm, in which the data is partitioned according to exemplars and their associated lists of members.
+
+lung_data.mem <- getHDmembers(lung_data.trans)
+
+# An exponential distribution is fitted to the upper tail of the nearest-neighbor distances between
+# exemplars (the observations considered representatives of each component of memberL
+
+lung_data.out <- getHDoutliers(lung_data.trans, lung_data.mem, alpha = 0.05)
+
+# Produces a plot of the data (transformed according to the Wilkinson’s specifications) showing the
+# outliers. If the data has more than two dimensions, it is plotted onto the principal components of
+# the data that remains after removing outliers.
+plotHDoutliers(lung_data_naimp,lung_data.out)
+
+# we identify the specific observations classified as outliers:
+rownames(lung_data.trans)[c(lung_data.out)]
+```
+
+
+When taking in account all the categorical and numerical variables available on the data set, excluding dates,  2 particular observations are considered outliers, "LUNG1-027" and "LUNG1-069". Extreme values for a single variable seem to make more sense when they are explained by other variables.
+
+
+
+```{r}
+# I add study date variable again to the update data set
+lung_data_no_na <- lung_data_naimp %>% cbind(Study.Date = lung_data_complete$Study.Date)
+lung_data_no_out <- lung_data_no_na[-c(which(rownames(lung_data_no_na) %in% rownames(lung_data.trans)[c(lung_data.out)])),]
+rownames(lung_data_no_out)
+dim(lung_data_no_out)
+```
+
+
+
+### Feature selection for radiomic variables
+
+
+```{r}
+radiomic_vars <- lung_data_no_out %>% keep(is.numeric) %>%
+  select(.,-c(age,Survival.time))
+```
+
+
+### Removing near cero variance features
+
+
+```{r}
+library(caret)
+names(radiomic_vars)[nearZeroVar(radiomic_vars)]
+```
+
+
+No near 0 variables
+
+
+### Eliminate redundant variables
+
+
+```{r}
+library(caret)
+
+redundant_vars <- findCorrelation(
+  cor(radiomic_vars),
+  cutoff = 0.90,
+  names = TRUE
+)
+non_redund_radiomics <- radiomic_vars %>% select(.,-c(redundant_vars))
+plot_correlation(non_redund_radiomics, type = "c", 
+                 theme_config = list("legend.position" = "bottom","axis.text.x" = element_blank(),"axis.text.y" = element_blank()))
+```
+
+
+Another option is using mRMR method that helps eliminating redundant variables but making sure we reatain variables relevant for discriminating between histology classes.
+
+Here I tried using this method both with basic high correlation filter, and on its own. 
+
+
+Result when applying directly over the whole set of radiomic variables:
+
+
+```{r}
+library(praznik)
+mrmr_results <- MRMR(radiomic_vars,lung_data_no_out$Histology, k=50)
+
+mrmr_radiomics <- radiomic_vars %>% select(mrmr_results$selection)
+
+plot_correlation(mrmr_radiomics, type = "c", theme_config = list(legend.position = "bottom", axis.text.x = element_text(angle =
+    90, size = 9), axis.text.y = element_text(size = 9)))
+
+ggsave("figures/Fig7.tiff",width = 400, height = 400, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+Result when applying over prefiltered highly redundant variables:
+
+
+```{r}
+mrmr_results_prefilt <- MRMR(non_redund_radiomics,lung_data_no_out$Histology, k=50)
+
+mrmr_radiomics_prefilt <- non_redund_radiomics %>% select(mrmr_results_prefilt$selection)
+
+plot_correlation(mrmr_radiomics_prefilt, type = "c", theme_config = list(legend.position = "bottom", axis.text.x = element_text(angle =
+    90, size = 9), axis.text.y = element_text(size = 9)))
+
+ggsave("figures/Fig8.tiff",width = 400, height = 400, device="tiff", dpi=300, units = "mm", scale = 1) 
+```
+
+
+
+```{r}
+lung_data_selected_radiomics <- cbind(lung_data_no_out %>%
+                                        select(.,-c(starts_with('original'),
+                                                    starts_with('wavelet'),
+                                                    starts_with('log'))),
+                                      mrmr_radiomics)
+str(lung_data_selected_radiomics)
+```
+
+
+
+
+Now I will continue exploring selected radiomics distributions and relationship with histology variable:
+
+
+```{r}
+mrmr_radiomics %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free", ncol = 4) +
+    geom_histogram() +
+    theme(strip.text.x = element_text(size = 6))
+ggsave("figures/Fig5.6.tiff",width = 174, height = 300, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+
+
+
+
+```{r}
+radiomics_hist <- mrmr_radiomics %>% cbind(Histology = lung_data_selected_radiomics$Histology)
+crostab <- crosstable(num_digits = 3,radiomics_hist, c(colnames(radiomics_hist %>% select(.,-Histology))), by = Histology, test = TRUE) 
+
+hist_rad_vars <- crostab %>% separate(test,
+            into = c('pvalue', 
+                    'test'),
+            sep = "\n") %>% 
+            separate(pvalue,
+            into = c('string', 
+                    'pval'),
+            sep = ":",
+            convert = TRUE) %>% 
+            arrange(pval) %>% 
+            filter(variable == 'Mean (std)') %>% 
+            select(.,-c(string,.id)) %>% kable(full_with = FALSE) %>% kable_classic_2() %>% save_kable('tables/radiomic_histo.pdf')
+
+```
+
+
+
+```{r}
+# I log var values to ease visualization and comparison of different groups
+plot_boxplot(log(mrmr_radiomics) %>% 
+               select(wavelet.HHL_firstorder_Kurtosis,wavelet.HHH_glcm_ClusterProminence,wavelet.HHH_firstorder_Kurtosis,
+                      wavelet.HHL_gldm_SmallDependenceHighGrayLevelEmphasis,wavelet.HLH_firstorder_Median,
+                      wavelet.LHL_gldm_LargeDependenceLowGrayLevelEmphasis,original_glcm_ClusterShade,wavelet.HHL_glcm_ClusterProminence) %>% 
+               cbind(Histology = lung_data_selected_radiomics$Histology)
+             , by = "Histology")+
+    theme(strip.text.x = element_text(size = 2))
+ggsave("figures/Fig8.tiff",width = 174, height = 200, device="tiff", dpi=300, units = "mm", scale = 1)
+```
+
+
+
+
+### Model Based Clustering 
+
+
+#### Clust Model including just radiomic variables:
+
+
+
+```{r}
+radiomics_only <- lung_data_selected_radiomics %>% 
+  keep(is.numeric) %>% 
+  select(.,-c(age,Survival.time))
+norm_radiomics <- as.data.frame(
+  lapply(radiomics_only,
+         scale))
+
+# I apply shapiro wilk test to every numeric value in the data frame
+shap <- norm_radiomics %>% 
+  apply(.,2,shapiro.test) 
+
+# I define a vector with a boolean stating if p value is greater than 0.05
+shapres <- sapply(shap, function(x) x$p.value > .05)
+table(shapres)
+
+plot_qq(norm_radiomics )
+```
+
+
+```{r}
+library(DescTools)
+trimmed_radiomics <-as.data.frame(lapply(radiomics_only, function(x) Winsorize(x, probs = c(0.05, 0.95))))
+
+# I apply shapiro wilk test to every numeric value in the data frame
+shap <- trimmed_radiomics %>% 
+  apply(.,2,shapiro.test) 
+
+# I define a vector with a boolean stating if p value is greater than 0.05
+shapres <- sapply(shap, function(x) x$p.value > .05)
+table(shapres)
+
+plot_qq(trimmed_radiomics)
+```
+
+
+```{r}
+# I define a custom function to implement log + 10000 to take into account negative values
+log1 <- function(x) {
+  log(x + 10000)
+}
+
+log_radiomics <- as.data.frame(
+  lapply(radiomics_only,
+         log1))
+
+# I apply shapiro wilk test to every numeric value in the data frame
+shap <- log_radiomics %>% 
+  apply(.,2,shapiro.test) 
+
+# I define a vector with a boolean stating if p value is greater than 0.05
+shapres <- sapply(shap, function(x) x$p.value > .05)
+table(shapres)
+
+plot_qq(log_radiomics)
+```
+
+
+```{r}
+# I define a custom function to implement sqrt + 10000 to take into account negative values
+sqrt1 <- function(x) {
+  sqrt(x + 10000)
+}
+
+sqrt_radiomics <- as.data.frame(
+  lapply(radiomics_only,
+         sqrt1))
+
+# I apply shapiro wilk test to every numeric value in the data frame
+shap <- sqrt_radiomics %>% 
+  apply(.,2,shapiro.test) 
+
+# I define a vector with a boolean stating if p value is greater than 0.05
+shapres <- sapply(shap, function(x) x$p.value > .05)
+table(shapres)
+
+plot_qq(sqrt_radiomics)
+```
+
+
+
+
+
+```{r}
+library(mclust)
+```
+
+
+
+```{r}
+BIC <- mclustBIC(radiomics_only)
+plot(BIC)
+summary(BIC)
+lung_data_mclust <- Mclust(radiomics_only, x = BIC)
+summary(lung_data_mclust)
+table_hist_clust <- table(lung_data_selected_radiomics$Histology,lung_data_mclust$classification)
+
+library(ca)
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+title(main="Solucion asimetrica",line=1)
+```
+
+
+Correspondance analysis assymetrical representation were we can see columns (clusters) represented with the principal coordinates, and rows (histology class) represented with the vertices defined by the standard coordinates for the first two components. This representation allows us to see relationship between clusters and between clusters and histology classes. 
+
+
+```{r}
+BIC <- mclustBIC(norm_radiomics)
+plot(BIC)
+summary(BIC)
+lung_data_mclust_1 <- Mclust(norm_radiomics, x = BIC)
+summary(lung_data_mclust_1)
+table_hist_clust <- table(lung_data_selected_radiomics$Histology,lung_data_mclust_1$classification)
+
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+title(main="Solucion asimetrica",line=1)
+
+```
+
+```{r}
+BIC <- mclustBIC(trimmed_radiomics)
+plot(BIC)
+summary(BIC)
+lung_data_mclust_2 <- Mclust(trimmed_radiomics, x = BIC)
+summary(lung_data_mclust_2)
+(table_hist_clust <- table(lung_data_selected_radiomics$Histology,lung_data_mclust_2$classification))
+
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+title(main="Solucion asimetrica",line=1)
+```
+
+
+
+With variable selection:
+
+
+```{r}
+res_with <- VarSelCluster(x = norm_radiomics,
+                          gvals = 2:6, 
+                          nbcores = 4, 
+                          initModel=40, 
+                          crit.varsel = "BIC")
+
+summary(res_with)
+plot(res_with)
+
+(table_hist_clust <- table(lung_data_selected_radiomics$Histology,res_with@partitions@zMAP))
+
+ARI(lung_data_selected_radiomics$Histology, fitted(res_with))
+
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+
+res_with@model
+```
+
+
+
+#### Clust Model including numerical (radiomic + clinical) and categorical variables (clinical + manufacturer):
+
+
+```{r}
+library(VarSelLCM)
+# Cluster analysis without variable selection
+res_without <- VarSelCluster(x = cbind(scale(lung_selected_radiomics %>% 
+                                         keep(is.numeric) %>% 
+                                         select(.,-Survival.time)),
+                                       lung_selected_radiomics %>% 
+                                         keep(is.factor) %>% 
+                                         select(clinical.T.Stage,
+                                                Clinical.N.Stage, 
+                                                Overall.Stage,
+                                                gender,
+                                                Manufacturer)), 
+                             gvals = 6:9,  
+                             vbleSelec = FALSE, 
+                             crit.varsel = "BIC")
+summary(res_without)
+plot(res_without)
+
+(table_hist_clust <- table(lung_selected_radiomics$Histology,res_without@partitions@zMAP))
+
+ARI(lung_data_selected_radiomics$Histology, fitted(res_without))
+
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+title(main="Solucion asimetrica",line=1)
+
+```
+
+
+```{r}
+# Cluster analysis with variable selection (with parallelisation)
+res_with <- VarSelCluster(x = cbind(scale(lung_selected_radiomics %>% 
+                                         keep(is.numeric) %>% 
+                                         select(.,-Survival.time)),
+                                       lung_data_selected_radiomics %>% 
+                                         keep(is.factor) %>% 
+                                         select(clinical.T.Stage,
+                                                Clinical.N.Stage, 
+                                                Overall.Stage,
+                                                gender,
+                                                Manufacturer)),
+                          gvals = 2:6, 
+                          nbcores = 4, 
+                          initModel=40, 
+                          crit.varsel = "BIC")
+
+summary(res_with)
+plot(res_with)
+
+(table_hist_clust <- table(lung_data_selected_radiomics$Histology,res_with@partitions@zMAP))
+
+ARI(lung_data_selected_radiomics$Histology, fitted(res_with))
+
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+
+res_with@model
+
+```
+
+
+
+
+
+
+
+### What happens if we remove Histology NOS patients?
+
+
+```{r}
+no_nos <- cbind(norm_radiomics, Histology = lung_selected_radiomics$Histology) %>% filter(Histology != 'nos') %>%
+  droplevels()
+res_with <- VarSelCluster(x = no_nos %>% keep(is.numeric),
+                          gvals = 2:6, 
+                          nbcores = 4, 
+                          initModel=40, 
+                          crit.varsel = "BIC")
+
+summary(res_with)
+plot(res_with)
+
+(table_hist_clust <- table(no_nos$Histology,res_with@partitions@zMAP))
+
+ARI(no_nos$Histology, fitted(res_with))
+
+ca.res <- ca(table_hist_clust)
+plot(ca.res, map= "colprincipal") 
+
+res_with@model
+```
+
+
+
+
