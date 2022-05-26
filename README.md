@@ -2,6 +2,7 @@
 ### Master en Bioinformatica y Bioestadistica (UOC-UB)
 #### Maria Mercedes Serra - Junio 2022
 
+This Anex aims to register all the process and code used to analyse and present the results of the presentation "Application of clustering and visualization methods of computed tomography radiomic features to contribute to the characterization of patients with non-metastatic Non-small-cell lung cancer."
 
 Data used for this work is available on complete_clinrad_data.csv
 This csv file includes clinical data, dicom metadata and radiomic features extracted from MASSTRO Lung1 dataset available in the Cancer Imaging Archive (TCIA) - https://wiki.cancerimagingarchive.net/display/Public/NSCLC-Radiomics#1605685425ba360de46d4509a8324498b9c01868
